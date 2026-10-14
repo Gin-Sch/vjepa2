@@ -37,7 +37,7 @@ VJEPA2_DIR="${VJEPA2_DIR:-/rhomes/gschum/vjepa2}"
 PRETRAIN_CONFIG="${PRETRAIN_CONFIG:-${VJEPA2_DIR}/configs/train/vitl16/pretrain_vitl16_h200.yaml}"
 TIMESTAMP_OUT_DIR="${TIMESTAMP_OUT_DIR:-1}"
 
-conda activate vjepa_pretrain
+conda activate vjepa2
 
 cd "${VJEPA2_DIR}"
 export PYTHONPATH="${VJEPA2_DIR}:${PYTHONPATH:-}"
