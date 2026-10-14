@@ -30,7 +30,8 @@ data:
     - 16
   tubelet_size: 2
   frame_step: 4
-  num_workers: 8
+  # Match scripts/train_vjepa.sh --cpus-per-task=4
+  num_workers: 4
   persistent_workers: true
   pin_mem: true
   # Skip bouts shorter than clip_len (= frames_per_clip * frame_step).

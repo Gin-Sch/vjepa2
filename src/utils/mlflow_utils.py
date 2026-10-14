@@ -193,7 +193,15 @@ def start_run(
     if rank != 0 or not is_enabled(cfg):
         return False
 
-    import mlflow
+    try:
+        import mlflow
+    except ImportError:
+        logger.warning(
+            "logging.mlflow.enabled is true but the 'mlflow' package is not "
+            "installed; continuing without MLflow. "
+            "Install with: pip install mlflow"
+        )
+        return False
 
     cfg = cfg or {}
     uri = setup_tracking(cfg.get("tracking_uri"))

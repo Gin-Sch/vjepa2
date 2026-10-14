@@ -27,7 +27,8 @@ data:
   tubelet_size: 2
   # Match V-JEPA1 sampling_rate=4 (fixed frame step). Omit fps when set.
   frame_step: 4
-  num_workers: 8
+  # Match scripts/train_vjepa.sh --cpus-per-task=4
+  num_workers: 4
   persistent_workers: true
   pin_mem: true
 

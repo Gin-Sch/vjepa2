@@ -181,10 +181,17 @@ def main(args, resume_preempt=False):
 
     # -- set device
     if not torch.cuda.is_available():
-        device = torch.device("cpu")
-    else:
-        device = torch.device("cuda:0")
-        torch.cuda.set_device(device)
+        raise RuntimeError(
+            "CUDA is not available to this PyTorch build, so V-JEPA2 cannot "
+            "train on GPU. The node driver reports CUDA 12.6 (12060); install a "
+            "matching wheel, e.g.\n"
+            "  pip install --upgrade torch torchvision "
+            "--index-url https://download.pytorch.org/whl/cu126\n"
+            "Then verify with: python -c \"import torch; print(torch.__version__, "
+            "torch.version.cuda, torch.cuda.is_available())\""
+        )
+    device = torch.device("cuda:0")
+    torch.cuda.set_device(device)
 
     # -- log/checkpointing paths
     os.makedirs(folder, exist_ok=True)

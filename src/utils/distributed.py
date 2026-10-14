@@ -39,15 +39,30 @@ def init_distributed(port=37129, rank_and_world_size=(None, None)):
         except Exception:
             logger.info("SLURM vars not set (distributed training not available)")
             world_size, rank = 1, 0
+            # Still init a singleton process group so DistributedDataParallel works.
+            rank, world_size = 0, 1
+
+    os.environ["MASTER_PORT"] = str(port)
+    # NCCL needs a working CUDA stack; fall back to gloo (CPU) if it fails so
+    # callers still get an initialized default process group.
+    backends = ("nccl", "gloo") if torch.cuda.is_available() else ("gloo",)
+    last_error = None
+    for backend in backends:
+        try:
+            torch.distributed.init_process_group(
+                backend=backend, world_size=world_size, rank=rank
+            )
+            if backend != "nccl":
+                logger.info(
+                    f"Initialized process group with backend={backend} "
+                    f"(rank={rank}/{world_size})"
+                )
             return world_size, rank
+        except Exception as e:
+            last_error = e
+            logger.info(f"init_process_group(backend={backend}) failed: {e}")
 
-    try:
-        os.environ["MASTER_PORT"] = str(port)
-        torch.distributed.init_process_group(backend="nccl", world_size=world_size, rank=rank)
-    except Exception as e:
-        world_size, rank = 1, 0
-        logger.info(f"Rank: {rank}. Distributed training not available {e}")
-
+    logger.info(f"Rank: {rank}. Distributed training not available {last_error}")
     return world_size, rank
 
 

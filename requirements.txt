@@ -5,7 +5,7 @@ wandb
 iopath
 pyyaml
 numpy
-opencv-python
+opencv-python-headless
 submitit
 braceexpand
 webdataset
