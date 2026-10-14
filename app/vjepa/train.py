@@ -31,6 +31,7 @@ from app.vjepa.utils import init_opt, init_video_model, load_checkpoint
 from src.datasets.data_manager import init_data
 from src.masks.multiseq_multiblock3d import MaskCollator
 from src.masks.utils import apply_masks
+from src.utils import mlflow_utils
 from src.utils.distributed import init_distributed
 from src.utils.logging import AverageMeter, CSVLogger, get_logger, gpu_timer
 
@@ -103,17 +104,34 @@ def main(args, resume_preempt=False):
     dataset_paths = cfgs_data.get("datasets", [])
     datasets_weights = cfgs_data.get("datasets_weights")
     dataset_fpcs = cfgs_data.get("dataset_fpcs")
+    if dataset_fpcs is None:
+        # Allow V-JEPA1-style num_frames when dataset_fpcs is omitted.
+        num_frames = cfgs_data.get("num_frames")
+        if num_frames is None:
+            raise ValueError("data.dataset_fpcs (or data.num_frames) is required")
+        dataset_fpcs = [int(num_frames)] * max(len(dataset_paths), 1)
     max_num_frames = max(dataset_fpcs)
     if datasets_weights is not None:
         assert len(datasets_weights) == len(dataset_paths), "Must have one sampling weight specified for each dataset"
     batch_size = cfgs_data.get("batch_size")
     tubelet_size = cfgs_data.get("tubelet_size")
     fps = cfgs_data.get("fps")
+    # V-JEPA1 used sampling_rate as a fixed decord frame step; prefer that when set.
+    frame_sample_rate = cfgs_data.get("frame_step", cfgs_data.get("sampling_rate"))
+    if frame_sample_rate is not None:
+        frame_sample_rate = int(frame_sample_rate)
+        fps = None
     crop_size = cfgs_data.get("crop_size", 224)
     patch_size = cfgs_data.get("patch_size")
     pin_mem = cfgs_data.get("pin_mem", False)
     num_workers = cfgs_data.get("num_workers", 1)
     persistent_workers = cfgs_data.get("persistent_workers", True)
+    filter_short_videos = cfgs_data.get("filter_short_videos", False)
+
+    # -- LOGGING (optional write_tag / mlflow; folder remains top-level in V-JEPA2)
+    cfgs_logging = args.get("logging") or {}
+    tag = cfgs_logging.get("write_tag") or args.get("write_tag")
+    cfgs_mlflow = cfgs_logging.get("mlflow") if cfgs_logging else args.get("mlflow")
 
     # -- DATA AUGS
     cfgs_data_aug = args.get("data_aug")
@@ -169,8 +187,13 @@ def main(args, resume_preempt=False):
         torch.cuda.set_device(device)
 
     # -- log/checkpointing paths
-    log_file = os.path.join(folder, f"log_r{rank}.csv")
-    latest_file = "latest.pt"
+    os.makedirs(folder, exist_ok=True)
+    if tag:
+        log_file = os.path.join(folder, f"{tag}_r{rank}.csv")
+        latest_file = f"{tag}-latest.pt"
+    else:
+        log_file = os.path.join(folder, f"log_r{rank}.csv")
+        latest_file = "latest.pt"
     latest_path = os.path.join(folder, latest_file)
     load_path = None
     if load_model:
@@ -182,9 +205,16 @@ def main(args, resume_preempt=False):
                 resume_anneal = False
         else:
             load_path = r_file if r_file is not None else latest_path
+            if r_file is not None and not os.path.isabs(r_file) and not os.path.exists(load_path):
+                load_path = os.path.join(folder, r_file)
         if not os.path.exists(load_path):
-            load_path = None
-            load_model = False
+            # Fall back to stock V-JEPA2 filename for resumed runs.
+            stock_latest = os.path.join(folder, "latest.pt")
+            if os.path.exists(stock_latest):
+                load_path = stock_latest
+            else:
+                load_path = None
+                load_model = False
 
     # -- make csv_logger
     csv_logger = CSVLogger(
@@ -195,6 +225,16 @@ def main(args, resume_preempt=False):
         ("%d", "iter-time(ms)"),
         ("%d", "gpu-time(ms)"),
         ("%d", "dataload-time(ms)"),
+    )
+
+    mlflow_utils.start_run(
+        cfgs_mlflow,
+        rank=rank,
+        default_experiment_name="vjepa2-pretrain",
+        default_run_name=tag or "vjepa2",
+        params=args,
+        tags={"app": "vjepa", "phase": "pretrain"},
+        config_artifact=args,
     )
 
     # -- init model
@@ -253,6 +293,8 @@ def main(args, resume_preempt=False):
         training=True,
         dataset_fpcs=dataset_fpcs,
         fps=fps,
+        frame_sample_rate=frame_sample_rate,
+        filter_short_videos=filter_short_videos,
         transform=transform,
         rank=rank,
         world_size=world_size,
@@ -521,16 +563,30 @@ def main(args, resume_preempt=False):
                             data_elapsed_time_meter.avg,
                         )
                     )
+                    mlflow_utils.log_metrics(
+                        {
+                            "loss": loss_meter.avg,
+                            "gpu_time_ms": gpu_time_meter.avg,
+                            "iter_time_ms": iter_time_meter.avg,
+                            "data_time_ms": data_elapsed_time_meter.avg,
+                            "lr": _new_lr,
+                            "wd": _new_wd,
+                        },
+                        step=epoch * ipe + itr,
+                    )
 
             log_stats()
             assert not np.isnan(loss), "loss is nan"
 
         # -- Save Checkpoint
         logger.info("avg. loss %.3f" % loss_meter.avg)
+        mlflow_utils.log_metrics({"epoch_loss": loss_meter.avg}, step=epoch + 1)
         # -- Save Last
         if epoch % CHECKPOINT_FREQ == 0 or epoch == (num_epochs - 1):
             save_checkpoint(epoch + 1, latest_path)
             if save_every_freq > 0 and epoch % save_every_freq == 0:
-                save_every_file = f"e{epoch}.pt"
+                save_every_file = f"{tag}-e{epoch}.pt" if tag else f"e{epoch}.pt"
                 save_every_path = os.path.join(folder, save_every_file)
                 save_checkpoint(epoch + 1, save_every_path)
+
+    mlflow_utils.end_run()

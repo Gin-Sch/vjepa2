@@ -1,0 +1,121 @@
+# V-JEPA 2 pretrain on human cam2 walking bouts only.
+#
+# Build the bout-expanded index (one row per bout with start/end frames):
+#   conda activate myenv
+#   python scripts/prepare_vjepa_bout_csv.py \
+#     --index-csv /rhomes/gschum/jepa/trainCSV/human_cam2.csv \
+#     --bout-csv /rhomes/gschum/AgePredictionHumanGait/outputs/walking_bouts_frames.csv \
+#     --output /rhomes/gschum/jepa/trainCSV/human_cam2_bouts.csv \
+#     --min-bout-frames 64
+#
+# Launch:
+#   PRETRAIN_CONFIG=configs/train/vitl16/pretrain_vitl16_human_cam2_bouts.yaml \
+#     sbatch scripts/train_vjepa.sh
+# (appends _YYYY-MM-DD_HHMMSS to folder unless TIMESTAMP_OUT_DIR=0)
+
+app: vjepa
+nodes: 1
+tasks_per_node: 1
+cpus_per_task: 4
+folder: /rhomes/gschum/vjepa2/outputs/vjepa2_pretrain_human_cam2_bouts
+
+data:
+  dataset_type: VideoDataset
+  datasets:
+    - /rhomes/gschum/jepa/trainCSV/human_cam2_bouts.csv
+  batch_size: 24
+  crop_size: 256
+  patch_size: 16
+  dataset_fpcs:
+    - 16
+  tubelet_size: 2
+  frame_step: 4
+  num_workers: 8
+  persistent_workers: true
+  pin_mem: true
+  # Skip bouts shorter than clip_len (= frames_per_clip * frame_step).
+  filter_short_videos: true
+
+data_aug:
+  auto_augment: false
+  motion_shift: false
+  random_resize_aspect_ratio:
+    - 0.75
+    - 1.35
+  random_resize_scale:
+    - 0.3
+    - 1.0
+  reprob: 0.0
+
+logging:
+  write_tag: human_cam2_bouts_vjepa2_vitl16
+  mlflow:
+    enabled: true
+    tracking_uri: null
+    experiment_name: vjepa2-pretrain
+    run_name: null
+
+loss:
+  loss_exp: 1.0
+
+mask:
+  - aspect_ratio:
+      - 0.75
+      - 1.5
+    full_complement: false
+    max_keep: null
+    max_temporal_keep: 1.0
+    num_blocks: 8
+    spatial_scale:
+      - 0.15
+      - 0.15
+    temporal_scale:
+      - 1.0
+      - 1.0
+  - aspect_ratio:
+      - 0.75
+      - 1.5
+    full_complement: false
+    max_keep: null
+    max_temporal_keep: 1.0
+    num_blocks: 2
+    spatial_scale:
+      - 0.7
+      - 0.7
+    temporal_scale:
+      - 1.0
+      - 1.0
+
+meta:
+  dtype: bfloat16
+  eval_freq: 100
+  load_checkpoint: false
+  read_checkpoint: null
+  save_every_freq: -1
+  seed: 234
+  use_sdpa: true
+
+model:
+  model_name: vit_large
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  uniform_power: true
+  use_activation_checkpointing: true
+  use_mask_tokens: true
+  use_rope: true
+  zero_init_mask_tokens: true
+
+optimization:
+  ema:
+    - 0.998
+    - 1.0
+  epochs: 300
+  final_lr: 1.0e-06
+  final_weight_decay: 0.4
+  ipe: null
+  ipe_scale: 1.25
+  lr: 0.000625
+  start_lr: 0.0002
+  warmup: 40
+  weight_decay: 0.04

@@ -10,7 +10,6 @@ import warnings
 from logging import getLogger
 
 import numpy as np
-import pandas as pd
 import torch
 import torchvision
 from decord import cpu, VideoReader
@@ -20,6 +19,8 @@ from src.datasets.utils.dataloader import (
     MonitoredDataset,
     NondeterministicDataLoader,
 )
+from src.datasets.utils.video.clip_sampling import sample_clip_indices
+from src.datasets.utils.video.vjepa_index import load_vjepa_index
 from src.datasets.utils.weighted_sampler import DistributedWeightedSampler
 
 _GLOBAL_SEED = 0
@@ -173,28 +174,24 @@ class VideoDataset(torch.utils.data.Dataset):
                 'Unable to import "decord" which is required to read videos.'
             )
 
-        # Load video paths and labels
-        samples, labels = [], []
+        # Load video paths, labels, and optional inclusive bout frame ranges.
+        samples, labels, frame_ranges = [], [], []
         self.num_samples_per_dataset = []
         for data_path in self.data_paths:
 
             if data_path[-4:] == ".csv":
-                try:
-                    data = pd.read_csv(data_path, header=None, delimiter=" ")
-                except pd.errors.ParserError:
-                    # In image captioning datasets where we have space, we use :: as delimiter.
-                    data = pd.read_csv(data_path, header=None, delimiter="::")
-                samples += list(data.values[:, 0])
-                labels += list(data.values[:, 1])
-                num_samples = len(data)
-                self.num_samples_per_dataset.append(num_samples)
+                rows = load_vjepa_index(data_path)
+                samples += [row.path for row in rows]
+                labels += [row.label for row in rows]
+                frame_ranges += [row.frame_range for row in rows]
+                self.num_samples_per_dataset.append(len(rows))
 
             elif data_path[-4:] == ".npy":
                 data = np.load(data_path, allow_pickle=True)
                 data = list(map(lambda x: repr(x)[1:-1], data))
                 samples += data
                 labels += [0] * len(data)
-                num_samples = len(data)
+                frame_ranges += [None] * len(data)
                 self.num_samples_per_dataset.append(len(data))
 
         self.per_dataset_indices = ConcatIndices(self.num_samples_per_dataset)
@@ -209,6 +206,15 @@ class VideoDataset(torch.utils.data.Dataset):
 
         self.samples = samples
         self.labels = labels
+        self.frame_ranges = frame_ranges
+
+        n_ranged = sum(1 for fr in frame_ranges if fr is not None)
+        if n_ranged:
+            logger.info(
+                "VideoDataset: %d/%d samples have bout frame ranges",
+                n_ranged,
+                len(frame_ranges),
+            )
 
     def __getitem__(self, index):
         sample = self.samples[index]
@@ -231,11 +237,12 @@ class VideoDataset(torch.utils.data.Dataset):
 
     def get_item_video(self, index):
         sample = self.samples[index]
+        frame_range = self.frame_ranges[index]
         dataset_idx, _ = self.per_dataset_indices[index]
         frames_per_clip = self.dataset_fpcs[dataset_idx]
 
         buffer, clip_indices = self.loadvideo_decord(
-            sample, frames_per_clip
+            sample, frames_per_clip, frame_range=frame_range
         )  # [T H W 3]
         loaded_video = len(buffer) > 0
         if not loaded_video:
@@ -286,8 +293,20 @@ class VideoDataset(torch.utils.data.Dataset):
 
         return buffer, label, clip_indices
 
-    def loadvideo_decord(self, sample, fpc):
-        """Load video content using Decord"""
+    def loadvideo_decord(self, sample, fpc, frame_range=None):
+        """Load video content using Decord.
+
+        Parameters
+        ----------
+        sample:
+            Absolute path to the video file.
+        fpc:
+            Frames per clip for this sample's dataset.
+        frame_range:
+            Optional inclusive ``(start_frame, end_frame)`` bout window. When
+            set, clip sampling is restricted to that span (indices remain
+            absolute in the source video).
+        """
 
         fname = sample
         if not os.path.exists(fname):
@@ -321,66 +340,48 @@ class VideoDataset(torch.utils.data.Dataset):
         assert fstp is not None and fstp > 0
         clip_len = int(fpc * fstp)
 
-        if self.filter_short_videos and len(vr) < clip_len:
-            warnings.warn(f"skipping video of length {len(vr)}")
+        video_len = len(vr)
+        frame_offset = 0
+        effective_len = video_len
+
+        if frame_range is not None:
+            bout_start, bout_end = int(frame_range[0]), int(frame_range[1])
+            bout_start = max(0, bout_start)
+            bout_end = min(video_len - 1, bout_end)
+            if bout_end < bout_start:
+                warnings.warn(
+                    f"invalid bout range [{frame_range[0]}, {frame_range[1]}] "
+                    f"for video length {video_len}: {fname}"
+                )
+                return [], None
+            frame_offset = bout_start
+            effective_len = bout_end - bout_start + 1
+
+        if self.filter_short_videos and effective_len < clip_len:
+            warnings.warn(
+                f"skipping span of length {effective_len} "
+                f"(need >={clip_len}) in {fname}"
+            )
+            return [], None
+
+        if effective_len <= 0:
             return [], None
 
         vr.seek(0)  # Go to start of video before sampling frames
 
-        # Partition video into equal sized segments and sample each clip
-        # from a different segment
-        partition_len = len(vr) // self.num_clips
+        all_indices, clip_indices = sample_clip_indices(
+            effective_len=effective_len,
+            frames_per_clip=fpc,
+            frame_step=fstp,
+            num_clips=self.num_clips,
+            random_clip_sampling=self.random_clip_sampling,
+            allow_clip_overlap=self.allow_clip_overlap,
+            clip_len=clip_len,
+        )
 
-        all_indices, clip_indices = [], []
-        for i in range(self.num_clips):
-
-            if partition_len > clip_len:
-                # If partition_len > clip len, then sample a random window of
-                # clip_len frames within the segment
-                end_indx = clip_len
-                if self.random_clip_sampling:
-                    end_indx = np.random.randint(clip_len, partition_len)
-                start_indx = end_indx - clip_len
-                indices = np.linspace(start_indx, end_indx, num=fpc)
-                indices = np.clip(indices, start_indx, end_indx - 1).astype(np.int64)
-                # --
-                indices = indices + i * partition_len
-            else:
-                # If partition overlap not allowed and partition_len < clip_len
-                # then repeatedly append the last frame in the segment until
-                # we reach the desired clip length
-                if not self.allow_clip_overlap:
-                    indices = np.linspace(0, partition_len, num=partition_len // fstp)
-                    indices = np.concatenate(
-                        (
-                            indices,
-                            np.ones(fpc - partition_len // fstp) * partition_len,
-                        )
-                    )
-                    indices = np.clip(indices, 0, partition_len - 1).astype(np.int64)
-                    # --
-                    indices = indices + i * partition_len
-
-                # If partition overlap is allowed and partition_len < clip_len
-                # then start_indx of segment i+1 will lie within segment i
-                else:
-                    sample_len = min(clip_len, len(vr)) - 1
-                    indices = np.linspace(0, sample_len, num=sample_len // fstp)
-                    indices = np.concatenate(
-                        (
-                            indices,
-                            np.ones(fpc - sample_len // fstp) * sample_len,
-                        )
-                    )
-                    indices = np.clip(indices, 0, sample_len - 1).astype(np.int64)
-                    # --
-                    clip_step = 0
-                    if len(vr) > clip_len:
-                        clip_step = (len(vr) - clip_len) // (self.num_clips - 1)
-                    indices = indices + i * clip_step
-
-            clip_indices.append(indices)
-            all_indices.extend(list(indices))
+        if frame_offset:
+            all_indices = [int(i) + frame_offset for i in all_indices]
+            clip_indices = [indices + frame_offset for indices in clip_indices]
 
         buffer = vr.get_batch(all_indices).asnumpy()
         return buffer, clip_indices

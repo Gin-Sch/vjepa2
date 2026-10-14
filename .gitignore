@@ -1,6 +1,13 @@
 *.pyc
 .vscode/
 .*.swp
+outputs/
+mlruns/
+mlflow.db
+mlartifacts/
+logs/
+__pycache__/
+.pytest_cache/
 
 run_vjepa_aws.py
 run.py

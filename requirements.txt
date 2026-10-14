@@ -23,3 +23,7 @@ python-box
 scikit-image
 ftfy
 jupyter
+mlflow
+matplotlib
+scikit-learn
+pytest
