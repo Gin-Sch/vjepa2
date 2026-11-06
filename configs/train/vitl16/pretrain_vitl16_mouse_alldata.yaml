@@ -1,0 +1,120 @@
+# V-JEPA 2 pretraining on mouse beam-walk videos (camera 6), ALL mice.
+#
+# Same training CSV as the V-JEPA1 "all-data" model in MouseBeamWalk
+# (outputs/mousebeam_vjepa_vitl16-latest.pth.tar): all 1544 camera-6 videos /
+# 144 mice from manifests/vjepa_pretrain.csv. Every P2 test mouse is seen in
+# pretraining; the mouse-disjoint variant is pretrain_vitl16_mouse_heldout.yaml.
+# Optimisation and masking mirror the V-JEPA1 runs so leaderboard rows differ
+# by codebase/architecture (RoPE, 256 px), not schedule. V-JEPA1 additionally
+# used clip_grad=10.0, which this trainer does not expose.
+#
+# SLURM (pretrain -> metrics plot -> export all 1544 camera-6 videos -> table):
+#   sbatch scripts/train_vjepa2_mouse.sh            # VARIANT=alldata (default)
+
+app: vjepa
+nodes: 1
+tasks_per_node: 1
+cpus_per_task: 8
+folder: /rhomes/gschum/vjepa2/outputs/vjepa2_pretrain_mouse_alldata
+
+data:
+  dataset_type: VideoDataset
+  datasets:
+    - /rhomes/gschum/MouseBeamWalk/manifests/vjepa_pretrain.csv
+  batch_size: 24
+  crop_size: 256
+  patch_size: 16
+  dataset_fpcs:
+    - 16
+  tubelet_size: 2
+  # Match V-JEPA1 sampling_rate=4 (fixed frame step). Omit fps when set.
+  frame_step: 4
+  # V-JEPA1 mouse run used 8 workers; match scripts/train_vjepa2_mouse.sh --cpus-per-task=8
+  num_workers: 8
+  persistent_workers: true
+  pin_mem: true
+
+data_aug:
+  auto_augment: false
+  motion_shift: false
+  random_resize_aspect_ratio:
+    - 0.75
+    - 1.35
+  random_resize_scale:
+    - 0.3
+    - 1.0
+  reprob: 0.0
+
+logging:
+  write_tag: mousebeam_vjepa2_vitl16_alldata
+  mlflow:
+    enabled: true
+    tracking_uri: null  # null => sqlite:///<repo>/outputs/mlflow/mlflow.db
+    experiment_name: vjepa2-pretrain
+    run_name: null  # null => write_tag
+
+loss:
+  loss_exp: 1.0
+
+mask:
+  - aspect_ratio:
+      - 0.75
+      - 1.5
+    full_complement: false
+    max_keep: null
+    max_temporal_keep: 1.0
+    num_blocks: 8
+    spatial_scale:
+      - 0.15
+      - 0.15
+    temporal_scale:
+      - 1.0
+      - 1.0
+  - aspect_ratio:
+      - 0.75
+      - 1.5
+    full_complement: false
+    max_keep: null
+    max_temporal_keep: 1.0
+    num_blocks: 2
+    spatial_scale:
+      - 0.7
+      - 0.7
+    temporal_scale:
+      - 1.0
+      - 1.0
+
+meta:
+  dtype: bfloat16
+  eval_freq: 100
+  load_checkpoint: false
+  read_checkpoint: null
+  save_every_freq: -1
+  seed: 234
+  use_sdpa: true
+
+model:
+  model_name: vit_large
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  uniform_power: true
+  use_activation_checkpointing: true
+  use_mask_tokens: true
+  use_rope: true
+  zero_init_mask_tokens: true
+
+optimization:
+  ema:
+    - 0.998
+    - 1.0
+  epochs: 300
+  final_lr: 1.0e-06
+  final_weight_decay: 0.4
+  # null → use dataloader length (~1544 / 24 ≈ 64 iterations per epoch).
+  ipe: null
+  ipe_scale: 1.25
+  lr: 0.000625
+  start_lr: 0.0002
+  warmup: 40
+  weight_decay: 0.04
